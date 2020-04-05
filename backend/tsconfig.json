@@ -3,6 +3,7 @@
     "lib": [
       "es2017"
     ],
+    "esModuleInterop": true,
     "moduleResolution": "node",
     "noUnusedLocals": true,
     "noUnusedParameters": true,

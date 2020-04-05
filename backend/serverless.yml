@@ -22,10 +22,23 @@ provider:
   environment:
     TODOS_TABLE: Todos-${self:provider.stage}
     INDEX_NAME: TodoIdIndex
-    IMAGES_S3_BUCKET: serverless-attachments-ykdev${self:provider.stage}
+    TODO_INDEX_NAME: TodoIdOnlyIndex
+    IMAGES_S3_BUCKET: serverless-attachments-ykdev-${self:provider.stage}
+    THUMBNAILS_S3_BUCKET: serverless-thumbnail-ykdev-${self:provider.stage}
     SIGNED_URL_EXPIRATION: 600
+    ELASTICSEARCH_URL:
+      Fn::GetAtt: ["TodoSearch", "DomainEndpoint"]
+    SNS_ARN:
+      Fn::Join:
+              - ':'
+              - - arn:aws:sns
+                - Ref: AWS::Region
+                - Ref: AWS::AccountId
+                - todoCreateTopic-${self:provider.stage}
+    TODO_CREATE_TOPIC: todoCreateTopic-${self:provider.stage}
 
 custom:
+  topicName: imagesTopic-${self:provider.stage}
   documentation:
     api:
       info:
@@ -38,7 +51,7 @@ custom:
         schema: ${file(models/create-todo-request.json)}
       - name: UpdateTodoRequest
         contentType: application/json
-        schema: ${file(models/update-todo.json)}
+        schema: ${file(models/update-todo-request.json)}
 
 functions:
   Auth:
@@ -66,6 +79,25 @@ functions:
           - xray:PutTraceSegments
         Resource:
           - "*"
+
+  GetTodosElastic:
+    handler: src/lambda/http/getTodosElastic.handler
+    events:
+      - http:
+          authorizer: Auth
+          method: get
+          path: todos/elastic
+          cors: true
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - xray:PutTraceSegments
+        Resource:
+          - "*"
+      - Effect: Allow
+        Action:
+          - es:*
+        Resource: "*"
     
   CreateTodo:
     handler: src/lambda/http/createTodo.handler
@@ -89,6 +121,16 @@ functions:
       - Effect: Allow
         Action:
           - xray:PutTraceSegments
+        Resource:
+          - "*"
+      - Effect: Allow
+        Action:
+          - es:*
+        Resource: "*"
+      - Effect: Allow
+        Action:
+          - sns:Publish
+          - sns:Subscribe
         Resource:
           - "*"
 
@@ -167,6 +209,62 @@ functions:
           - xray:PutTraceSegments
         Resource:
           - "*"
+    
+  ImageResize:
+    handler: src/lambda/s3/resizeImage.handler
+    events:
+      - sns:
+          arn:
+            Fn::Join:
+              - ':'
+              - - arn:aws:sns
+                - Ref: AWS::Region
+                - Ref: AWS::AccountId
+                - ${self:custom.topicName}
+          topicName: ${self:custom.topicName}
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:Query
+          - dynamodb:UpdateItem
+          - dynamodb:GetItem
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.TODOS_TABLE}
+      - Effect: Allow
+        Action:
+          - dynamodb:Query
+          - dynamodb:UpdateItem
+          - dynamodb:GetItem
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.TODOS_TABLE}/*
+      - Effect: Allow
+        Action:
+          - xray:PutTraceSegments
+        Resource:
+          - "*"
+      - Effect: Allow
+        Action:
+          - s3:PutObject
+          - s3:GetObject
+        Resource: arn:aws:s3:::${self:provider.environment.THUMBNAILS_S3_BUCKET}/*
+   
+  IndexTodo:
+    handler: src/lambda/sns/createTodoSubscriber.handler
+    events:
+      - sns:
+          arn:
+            Fn::Join:
+              - ':'
+              - - arn:aws:sns
+                - Ref: AWS::Region
+                - Ref: AWS::AccountId
+                - ${self:provider.environment.TODO_CREATE_TOPIC}
+          topicName: ${self:provider.environment.TODO_CREATE_TOPIC}
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - xray:PutTraceSegments
+        Resource:
+          - "*"
+  
 
 resources:
   Resources:
@@ -200,6 +298,8 @@ resources:
             AttributeType: S
           - AttributeName: todoId
             AttributeType: S
+          - AttributeName: attachmentUrl
+            AttributeType: S
         KeySchema:
           - AttributeName: userId
             KeyType: HASH
@@ -216,11 +316,24 @@ resources:
                 KeyType: RANGE
             Projection:
               ProjectionType: ALL
+        GlobalSecondaryIndexes:
+          - IndexName: ${self:provider.environment.TODO_INDEX_NAME}
+            KeySchema:
+              - AttributeName: todoId
+                KeyType: HASH
+              - AttributeName: attachmentUrl
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
 
     AttachmentBucket:
       Type: AWS::S3::Bucket
       Properties:
         BucketName: ${self:provider.environment.IMAGES_S3_BUCKET}
+        NotificationConfiguration:
+          TopicConfigurations:
+            - Event: s3:ObjectCreated:Put
+              Topic: !Ref ImagesTopic
         CorsConfiguration:
           CorsRules:
             -
@@ -251,3 +364,93 @@ resources:
                 - s3:PutObject
               Resource: arn:aws:s3:::${self:provider.environment.IMAGES_S3_BUCKET}/*
         Bucket: !Ref AttachmentBucket
+
+    SNSTopicPolicy:
+      Type: AWS::SNS::TopicPolicy
+      Properties:
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                AWS: "*"
+              Action: sns:Publish
+              Resource:
+                !Ref ImagesTopic
+              Condition:
+                ArnLike:
+                  AWS:SourceArn: arn:aws:s3:::${self:provider.environment.IMAGES_S3_BUCKET}
+        Topics:
+          - !Ref ImagesTopic
+
+    ThumbnailsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.THUMBNAILS_S3_BUCKET}
+        CorsConfiguration:
+          CorsRules:
+            -
+              AllowedOrigins:
+                - '*'
+              AllowedHeaders:
+                - '*'
+              AllowedMethods:
+                - GET
+                - PUT
+                - POST
+                - DELETE
+                - HEAD
+              MaxAge: 3000
+    ThumbnailsBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        PolicyDocument:
+          Id: Policy
+          Version: '2012-10-17'
+          Statement:
+            - Sid: PublicReadWriteBucketPolicy
+              Effect: Allow
+              Principal: '*' # Anyone
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: arn:aws:s3:::${self:provider.environment.THUMBNAILS_S3_BUCKET}/*
+        Bucket: !Ref ThumbnailsBucket
+        
+
+    ImagesTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        DisplayName: Image bucket topic
+        TopicName: ${self:custom.topicName}
+    
+    TodoCreateTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        DisplayName: Todo create topic
+        TopicName: ${self:provider.environment.TODO_CREATE_TOPIC}
+
+    TodoSearch:
+      Type: AWS::Elasticsearch::Domain
+      Properties:
+        ElasticsearchVersion: '6.3'
+        DomainName: todo-search-${self:provider.stage}
+        ElasticsearchClusterConfig:
+          DedicatedMasterEnabled: false
+          InstanceCount: '1'
+          ZoneAwarenessEnabled: false
+          InstanceType: t2.small.elasticsearch
+        EBSOptions:
+          EBSEnabled: true
+          Iops: 0
+          VolumeSize: 10
+          VolumeType: 'gp2'
+        AccessPolicies:
+          Version: '2012-10-17'
+          Statement:
+            -
+              Effect: Allow
+              Principal:
+                AWS: '*'
+              Action: 'es:*'
+              Resource: '*'
