@@ -1,3 +1,44 @@
+# Capstone
+
+Writing client side is very complicated and irrelevant of the course focus. So I contunied with existing codebase.
+
+I added some enhancements and features.
+
+Previously attachment url was set while creating todo.
+
+But know, event driven architecture was used to set attachment url.
+
+After uploading image to S3 bucket. Bucket sends message to SNS topic.
+
+A lambda function is triggered when a notification comes to the SNS topic.
+
+This lambda function transcode original images and puts the thumbnail to another S3 bucket.
+
+Then updates todo's attachment url with thumbnail.
+
+So client side fetch thumbnail images which is more storage and network efficient.
+
+Also elasticsearch added to the project.
+
+After creating a todo item, current handler publish a message to the another SNS Topic.
+
+This TODO_CREATION event is being listened by another lambda function.
+
+This lambda function index coming event's message which is a todo item.
+
+I used SNS topic to transmit message because if you index inside creatotodo handler user needs to wait indexing.
+
+But event driven approach comes and saves us.
+
+Finally another lambda function added which returns items from elasticsearch.
+
+Postman collection was updated.
+
+Sample of get elasticsearch
+
+curl --location --request GET 'https://8ajz64fv4m.execute-api.eu-west-1.amazonaws.com/dev/todos/elastic?query=veli' \
+--header 'Authorization: Bearer ABCXASDASDAS...'
+
 # Serverless TODO
 
 To implement this project, you need to implement a simple TODO application using AWS Lambda and Serverless framework. Search for all comments starting with the `TODO:` in the code to find the placeholders that you need to implement.

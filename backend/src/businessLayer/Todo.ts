@@ -1,4 +1,3 @@
-import * as uuid from 'uuid'
 import { TodoAccess } from '../dataLayer/todoAccess'
 import { TodoItem } from '../models/TodoItem'
 import { UpdateTodoRequest } from '../requests/UpdateTodoRequest';
@@ -7,11 +6,9 @@ const todoAccess = new TodoAccess();
 const bucketName = process.env.IMAGES_S3_BUCKET
 
 export async function createTodo(todo): Promise<TodoItem> {
-    const todoId = uuid.v4()
-    todo.todoId = todoId
     todo.createdAt = new Date().toISOString()
     todo.done = false
-    todo.attachmentUrl = `https://${bucketName}.s3.amazonaws.com/${todoId}`
+    todo.attachmentUrl = `https://${bucketName}.s3.amazonaws.com/${todo.todoId}`
     return await todoAccess.createTodo(todo);
 }
 
